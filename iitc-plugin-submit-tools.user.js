@@ -13,589 +13,59 @@
 // @grant          none
 // ==/UserScript==
 
+// Wrapper function that will be stringified and injected
+// into the document. Because of this, normal closure rules
+// do not apply here.
 function wrapper(plugin_info) {
-  // ensure plugin framework is there, even if iitc is not yet loaded
-  if (typeof window.plugin !== 'function') window.plugin = function() {}
-
-  // PLUGIN START ////////////////////////////////////////////////////////
-
-  const helpers = {
-    zoomLocked: 0,
-    showGymCells: 0,
-    showCellsWithPortals: 0,
+  // Make sure that window.plugin exists. IITC defines it as a no-op function,
+  // and other plugins assume the same.
+  if (typeof window.plugin !== 'function') {
+    window.plugin = function() {};
   }
+  plugin_info.buildName = 'Submit Helper';
+  plugin_info.dateTimeVersion = '20181106082400';
+  plugin_info.pluginId = 'submit-helper';
 
-  const logger = {
-    info: (...args) => console.log('S2ZOOM', ...args),
-  }
+  /*   ---- START OF PLUGIN ----   */
 
-  // Use own namespace for plugin
-  window.plugin.l10s2grid = function() {}
+  const flags = {
+    cellsWithPortals: 0,
+    gymCells: 0,
+    s2Lock: 0
+  };
 
-  const toggleHelper = (key, targetValue) => {
-    if (helpers[key]) {
-      $(`#iitc-plugin-${key}`).removeClass('active')
-      helpers[key] = 0
-    } else {
-      $(`#iitc-plugin-${key}`).addClass('active')
-      helpers[key] = targetValue
-    }
+  // Create a namespace for the plugin
+  window.plugin.submitHelper = function() {};
 
-    window.plugin.l10s2grid.update()
-  }
+  window.plugin.submitHelper.setup = function() {
+    // Will inject S2 utilities to window.S2
+    injectS2Calculation();
 
-  window.plugin.l10s2grid.toggleShowCellsWithPortals = () => {
-    toggleHelper('showCellsWithPortals', true)
-  }
-  window.plugin.l10s2grid.toggleShowGymCells = () => {
-    toggleHelper('showGymCells', true)
-  }
-  window.plugin.l10s2grid.toggleZoomLocked = () => {
-    toggleHelper('zoomLocked', map.getZoom())
-  }
+    // Generic initialisation
+    injectStyles();
+    initialiseUI();
 
-  window.plugin.l10s2grid.setup = function() {
-    $('<link>')
-      .prop('rel', 'stylesheet')
-      .prop('href', 'https://use.fontawesome.com/releases/v5.4.2/css/all.css')
-      .appendTo('head')
+    // Bind methods to the namespace
+    window.plugin.submitHelper.update = updateFn;
 
-    /// S2 Geometry functions
-    // the regional scoreboard is based on a level 6 S2 Cell
-    // - https://docs.google.com/presentation/d/1Hl4KapfAENAOf4gv-pSngKwvS_jwNVHRPZTTDzXXn6Q/view?pli=1#slide=id.i22
-    // at the time of writing there's no actual API for the intel map to retrieve scoreboard data,
-    // but it's still useful to plot the score cells on the intel map
+    // Add IITC Plugin Hooks & map event listeners
+    window.addHook('mapDataEntityInject', window.plugin.submitHelper.update);
+    window.addHook('mapDataRefreshEnd', window.plugin.submitHelper.update);
+    map.on('zoomend', window.plugin.submitHelper.update);
+    map.on('moveend', window.plugin.submitHelper.update);
 
-    // the S2 geometry is based on projecting the earth sphere onto a cube, with some scaling of face coordinates to
-    // keep things close to approximate equal area for adjacent cells
-    // to convert a lat,lng into a cell id:
-    // - convert lat,lng to x,y,z
-    // - convert x,y,z into face,u,v
-    // - u,v scaled to s,t with quadratic formula
-    // - s,t converted to integer i,j offsets
-    // - i,j converted to a position along a Hubbert space-filling curve
-    // - combine face,position to get the cell id
+    // Kick things off
+    window.plugin.submitHelper.update();
+  };
 
-    //NOTE: compared to the google S2 geometry library, we vary from their code in the following ways
-    // - cell IDs: they combine face and the hilbert curve position into a single 64 bit number. this gives efficient space
-    //             and speed. javascript doesn't have appropriate data types, and speed is not cricical, so we use
-    //             as [face,[bitpair,bitpair,...]] instead
-    // - i,j: they always use 30 bits, adjusting as needed. we use 0 to (1<<level)-1 instead
-    //        (so GetSizeIJ for a cell is always 1)
-    ;(function() {
-      window.S2 = {}
+  const setup = window.plugin.submitHelper.setup;
 
-      const submitToolStyles = `
-    #iitc-plugin-showCellsWithPortals,
-    #iitc-plugin-showGymCells,
-    #iitc-plugin-zoomLocked {
-      height: 26px;
-      width: 26px;
-      right:0;
-      z-index:3003;
-      background: #fff;
-      color: black;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 500;
-      cursor: pointer;
-      position: relative;
-      border-bottom: 1px solid #ccc;
-    }
-    #iitc-plugin-zoomLocked.active {
-      background: #c75c3b;
-      color: whitesmoke;
-    }
-    #iitc-plugin-showGymCells {
-      border-bottom-left-radius: 4px;
-      border-bottom-right-radius: 4px;
-      border-bottom: 0;
-    }
-    #iitc-plugin-showCellsWithPortals > i,
-    #iitc-plugin-showGymCells > i {
-      font-size: 18px;
-      padding-left: 2px;
-      opacity: 0.3;
-    }
-    #iitc-plugin-showCellsWithPortals.active > i,
-    #iitc-plugin-showGymCells.active > i {
-      opacity: 1
-    }
-    .leaflet-touch #iitc-plugin-showCellsWithPortals,
-    .leaflet-touch #iitc-plugin-showGymCells,
-    .leaflet-touch #iitc-plugin-zoomLocked {
-      height: 30px;
-      width: 30px;
-    }
-  `
-      $('.leaflet-control-zoom').append(
-        '<div title="S2 LVL Locker" id="iitc-plugin-zoomLocked">z</div>',
-      )
-      $('.leaflet-control-zoom').append(
-        '<div title="S2 Empty Indicator" id="iitc-plugin-showCellsWithPortals"><i class="fas fa-eye"></i></div>',
-      )
-      $('.leaflet-control-zoom').append(
-        '<div title="S2 Gym Cell Indicator" id="iitc-plugin-showGymCells"><i class="fas fa-dragon"></i></div>',
-      )
-      $('<style>')
-        .prop('type', 'text/css')
-        .html(submitToolStyles)
-        .appendTo('head')
-      $('#iitc-plugin-showGymCells').click(
-        window.plugin.l10s2grid.toggleShowGymCells,
-      )
-      $('#iitc-plugin-showCellsWithPortals').click(
-        window.plugin.l10s2grid.toggleShowCellsWithPortals,
-      )
-      $('#iitc-plugin-zoomLocked').click(
-        window.plugin.l10s2grid.toggleZoomLocked,
-      )
+  ////// Plugin utility functions
 
-      const setZoomText = () => {
-        $('#iitc-plugin-zoomLocked').text(
-          `z${helpers.zoomLocked || map.getZoom()}`,
-        )
-      }
-      window.addHook('mapDataEntityInject', setZoomText)
-      window.addHook('mapDataRefreshEnd', () => {
-        setZoomText()
-        window.plugin.l10s2grid.update()
-      })
-      const LatLngToXYZ = (latLng) => {
-        const d2r = Math.PI / 180.0
-        const phi = latLng.lat * d2r
-        const theta = latLng.lng * d2r
-        const cosphi = Math.cos(phi)
-
-        return [
-          Math.cos(theta) * cosphi,
-          Math.sin(theta) * cosphi,
-          Math.sin(phi),
-        ]
-      }
-      const XYZToLatLng = (xyz) => {
-        const r2d = 180.0 / Math.PI
-        const lat = Math.atan2(
-          xyz[2],
-          Math.sqrt(xyz[0] * xyz[0] + xyz[1] * xyz[1]),
-        )
-        const lng = Math.atan2(xyz[1], xyz[0])
-
-        return L.latLng(lat * r2d, lng * r2d)
-      }
-      const largestAbsComponent = (xyz) => {
-        const temp = [Math.abs(xyz[0]), Math.abs(xyz[1]), Math.abs(xyz[2])]
-
-        if (temp[0] > temp[1]) {
-          if (temp[0] > temp[2]) {
-            return 0
-          } else {
-            return 2
-          }
-        } else {
-          if (temp[1] > temp[2]) {
-            return 1
-          } else {
-            return 2
-          }
-        }
-      }
-      const faceXYZToUV = (face, xyz) => {
-        let u, v
-        switch (face) {
-          case 0:
-            u = xyz[1] / xyz[0]
-            v = xyz[2] / xyz[0]
-            break
-          case 1:
-            u = -xyz[0] / xyz[1]
-            v = xyz[2] / xyz[1]
-            break
-          case 2:
-            u = -xyz[0] / xyz[2]
-            v = -xyz[1] / xyz[2]
-            break
-          case 3:
-            u = xyz[2] / xyz[0]
-            v = xyz[1] / xyz[0]
-            break
-          case 4:
-            u = xyz[2] / xyz[1]
-            v = -xyz[0] / xyz[1]
-            break
-          case 5:
-            u = -xyz[1] / xyz[2]
-            v = -xyz[0] / xyz[2]
-            break
-          default:
-            throw { error: 'Invalid face' }
-            break
-        }
-        return [u, v]
-      }
-      const XYZToFaceUV = (xyz) => {
-        let face = largestAbsComponent(xyz)
-        if (xyz[face] < 0) {
-          face += 3
-        }
-        uv = faceXYZToUV(face, xyz)
-        return [face, uv]
-      }
-      const FaceUVToXYZ = (face, uv) => {
-        const u = uv[0]
-        const v = uv[1]
-        switch (face) {
-          case 0:
-            return [1, u, v]
-          case 1:
-            return [-u, 1, v]
-          case 2:
-            return [-u, -v, 1]
-          case 3:
-            return [-1, -v, -u]
-          case 4:
-            return [v, -1, -u]
-          case 5:
-            return [v, u, -1]
-          default:
-            throw { error: 'Invalid face' }
-        }
-      }
-      const STToUV = (st) => {
-        const singleSTtoUV = (st) => {
-          if (st >= 0.5) {
-            return (1 / 3.0) * (4 * st * st - 1)
-          } else {
-            return (1 / 3.0) * (1 - 4 * (1 - st) * (1 - st))
-          }
-        }
-        return [singleSTtoUV(st[0]), singleSTtoUV(st[1])]
-      }
-      const UVToST = (uv) => {
-        const singleUVtoST = (uv) => {
-          if (uv >= 0) {
-            return 0.5 * Math.sqrt(1 + 3 * uv)
-          } else {
-            return 1 - 0.5 * Math.sqrt(1 - 3 * uv)
-          }
-        }
-        return [singleUVtoST(uv[0]), singleUVtoST(uv[1])]
-      }
-      const STToIJ = (st, order) => {
-        const maxSize = 1 << order
-        const singleSTtoIJ = (st) => {
-          const ij = Math.floor(st * maxSize)
-          return Math.max(0, Math.min(maxSize - 1, ij))
-        }
-        return [singleSTtoIJ(st[0]), singleSTtoIJ(st[1])]
-      }
-      const IJToST = (ij, order, offsets) => {
-        const maxSize = 1 << order
-        return [(ij[0] + offsets[0]) / maxSize, (ij[1] + offsets[1]) / maxSize]
-      }
-      // hilbert space-filling curve
-      // based on http://blog.notdot.net/2009/11/Damn-Cool-Algorithms-Spatial-indexing-with-Quadtrees-and-Hilbert-Curves
-      // note: rather then calculating the final integer hilbert position, we just return the list of quads
-      // this ensures no precision issues whth large orders (S3 cell IDs use up to 30), and is more
-      // convenient for pulling out the individual bits as needed later
-      const pointToHilbertQuadList = (x, y, order) => {
-        const hilbertMap = {
-          a: [[0, 'd'], [1, 'a'], [3, 'b'], [2, 'a']],
-          b: [[2, 'b'], [1, 'b'], [3, 'a'], [0, 'c']],
-          c: [[2, 'c'], [3, 'd'], [1, 'c'], [0, 'b']],
-          d: [[0, 'a'], [3, 'c'], [1, 'd'], [2, 'd']],
-        }
-        let currentSquare = 'a'
-        const positions = []
-        for (let i = order - 1; i >= 0; i--) {
-          const mask = 1 << i
-          const quad_x = x & mask ? 1 : 0
-          const quad_y = y & mask ? 1 : 0
-          const t = hilbertMap[currentSquare][quad_x * 2 + quad_y]
-
-          positions.push(t[0])
-          currentSquare = t[1]
-        }
-        return positions
-      }
-      // S2Cell class
-      S2.S2Cell = function() {}
-      //static method to construct
-      S2.S2Cell.FromLatLng = (latLng, level) => {
-        const xyz = LatLngToXYZ(latLng)
-        const faceuv = XYZToFaceUV(xyz)
-        const st = UVToST(faceuv[1])
-        const ij = STToIJ(st, level)
-
-        return S2.S2Cell.FromFaceIJ(faceuv[0], ij, level)
-        return result
-      }
-      S2.S2Cell.FromFaceIJ = (face, ij, level) => {
-        const cell = new S2.S2Cell()
-
-        cell.face = face
-        cell.ij = ij
-        cell.level = level
-
-        return cell
-      }
-      S2.S2Cell.prototype.toString = function() {
-        return (
-          'F' +
-          this.face +
-          'ij[' +
-          this.ij[0] +
-          ',' +
-          this.ij[1] +
-          ']@' +
-          this.level
-        )
-      }
-      S2.S2Cell.prototype.getLatLng = function() {
-        const st = IJToST(this.ij, this.level, [0.5, 0.5])
-        const uv = STToUV(st)
-        const xyz = FaceUVToXYZ(this.face, uv)
-
-        return XYZToLatLng(xyz)
-      }
-      S2.S2Cell.prototype.getCornerLatLngs = function() {
-        const result = []
-        const offsets = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]
-
-        for (let i = 0; i < 4; i++) {
-          const st = IJToST(this.ij, this.level, offsets[i])
-          const uv = STToUV(st)
-          const xyz = FaceUVToXYZ(this.face, uv)
-
-          result.push(XYZToLatLng(xyz))
-        }
-        return result
-      }
-      S2.S2Cell.prototype.getFaceAndQuads = function() {
-        const quads = pointToHilbertQuadList(this.ij[0], this.ij[1], this.level)
-        return [this.face, quads]
-      }
-      S2.S2Cell.prototype.getNeighbors = function() {
-        const fromFaceIJWrap = (face, ij, level) => {
-          const maxSize = 1 << level
-          if (ij[0] >= 0 && ij[1] >= 0 && ij[0] < maxSize && ij[1] < maxSize) {
-            // no wrapping out of bounds
-            return S2.S2Cell.FromFaceIJ(face, ij, level)
-          } else {
-            // the new i,j are out of range.
-            // with the assumption that they're only a little past the borders we can just take the points as
-            // just beyond the cube face, project to XYZ, then re-create FaceUV from the XYZ vector
-            const st = IJToST(ij, level, [0.5, 0.5])
-            const uv = STToUV(st)
-            const xyz = FaceUVToXYZ(face, uv)
-            const faceuv = XYZToFaceUV(xyz)
-
-            face = faceuv[0]
-            uv = faceuv[1]
-            st = UVToST(uv)
-            ij = STToIJ(st, level)
-
-            return S2.S2Cell.FromFaceIJ(face, ij, level)
-          }
-        }
-        const face = this.face
-        const i = this.ij[0]
-        const j = this.ij[1]
-        const level = this.level
-
-        return [
-          fromFaceIJWrap(face, [i - 1, j], level),
-          fromFaceIJWrap(face, [i, j - 1], level),
-          fromFaceIJWrap(face, [i + 1, j], level),
-          fromFaceIJWrap(face, [i, j + 1], level),
-        ]
-      }
-    })()
-    window.plugin.l10s2grid.regionLayer = L.layerGroup()
-
-    $('<style>')
-      .prop('type', 'text/css')
-      .html(
-        '.plugin-l10s2grid-name {\
-               font-size: 14px;\
-               font-weight: bold;\
-               color: gold;\
-               opacity: 0.7;\
-               text-align: center;\
-               text-shadow: -1px -1px #000, 1px -1px #000, -1px 1px #000, 1px 1px #000, 0 0 2px #000; \
-               pointer-events: none;\
-            }',
-      )
-      .appendTo('head')
-    addLayerGroup('S2 Grid', window.plugin.l10s2grid.regionLayer, true)
-    map.on('moveend', window.plugin.l10s2grid.update)
-    window.plugin.l10s2grid.update()
-  }
-  window.plugin.l10s2grid.regionName = (cell) => {
-    const face2name = ['AF', 'AS', 'NR', 'PA', 'AM', 'ST']
-    const codeWord = [
-      'ALPHA',
-      'BRAVO',
-      'CHARLIE',
-      'DELTA',
-      'ECHO',
-      'FOXTROT',
-      'GOLF',
-      'HOTEL',
-      'JULIET',
-      'KILO',
-      'LIMA',
-      'MIKE',
-      'NOVEMBER',
-      'PAPA',
-      'ROMEO',
-      'SIERRA',
-    ]
-    // ingress does some odd things with the naming. for some faces, the i and j coords are flipped when converting
-    // (and not only the names - but the full quad coords too!). easiest fix is to create a temporary cell with the coords
-    // swapped
-    if (cell.face == 1 || cell.face == 3 || cell.face == 5) {
-      cell = S2.S2Cell.FromFaceIJ(
-        cell.face,
-        [cell.ij[1], cell.ij[0]],
-        cell.level,
-      )
-    }
-    // first component of the name is the face
-    let name = face2name[cell.face]
-    if (cell.level >= 4) {
-      // next two components are from the most signifitant four bits of the cell I/J
-      const regionI = cell.ij[0] >> (cell.level - 4)
-      const regionJ = cell.ij[1] >> (cell.level - 4)
-      name += zeroPad(regionI + 1, 2) + '-' + codeWord[regionJ]
-    }
-    if (cell.level >= 8) {
-      // the final component is based on the hibbert curve for the relevant cell
-      const facequads = cell.getFaceAndQuads()
-      const number = facequads[1][4] * 4 + facequads[1][5]
-      name += '-' + zeroPad(number, 2)
-    }
-    return name
-  }
-  window.plugin.l10s2grid.update = () => {
-    window.plugin.l10s2grid.regionLayer.clearLayers()
-    const bounds = map.getBounds()
-    const seenCells = {}
-    const drawCellAndNeighbors = (
-      cell,
-      visiblePortals = [],
-      colourOverride,
-    ) => {
-      const cellStr = cell.toString()
-      if (!seenCells[cellStr]) {
-        // cell not visited - flag it as visited now
-        seenCells[cellStr] = true
-        // is it on the screen?
-        const corners = cell.getCornerLatLngs()
-        const cellBounds = L.latLngBounds(corners)
-        if (cellBounds.intersects(bounds)) {
-          // on screen - draw it
-          window.plugin.l10s2grid.drawCell(
-            cell,
-            cellBounds,
-            visiblePortals,
-            colourOverride,
-          )
-          // and recurse to our neighbors
-          const neighbors = cell.getNeighbors()
-          for (let i = 0; i < neighbors.length; i++) {
-            drawCellAndNeighbors(neighbors[i], visiblePortals, colourOverride)
-          }
-        }
-      }
-    }
-    // Set Cell Size
-    let cellSize = 10
-    // centre cell
-    let zoom = map.getZoom()
-    if (helpers.zoomLocked === 0) {
-      cellSize = zoom
-    } else {
-      cellSize = helpers.zoomLocked
-    }
-    if (zoom >= 5) {
-      const mapBounds = map.getBounds()
-      const visiblePortals = Object.values(window.portals || {})
-        .map((x) => ({
-          latLng: x.getLatLng(),
-          title: x.options.data.title,
-        }))
-        .filter((x) => x)
-        .filter((x) => {
-          if (!x.title || !x.latLng) return false
-          return mapBounds.contains(x.latLng)
-        })
-
-      const cell = S2.S2Cell.FromLatLng(map.getCenter(), cellSize)
-      drawCellAndNeighbors(cell, visiblePortals)
-    }
-
-    if (helpers.showGymCells) {
-      const center = S2.S2Cell.FromLatLng(map.getCenter(), 14)
-      drawCellAndNeighbors(center, [], '#ff31d9')
-    }
-    // the six cube side boundaries. we cheat by hard-coding the coords as it's simple enough
-    const latLngs = [
-      [45, -180],
-      [35.264389682754654, -135],
-      [35.264389682754654, -45],
-      [35.264389682754654, 45],
-      [35.264389682754654, 135],
-      [45, 180],
-    ]
-    const globalCellOptions = {
-      color: 'red',
-      weight: 7,
-      opacity: 0.5,
-      clickable: false,
-    }
-    for (let i = 0; i < latLngs.length - 1; i++) {
-      // the geodesic line code can't handle a line/polyline spanning more than (or close to?) 180 degrees, so we draw
-      // each segment as a separate line
-      const poly1 = L.geodesicPolyline(
-        [latLngs[i], latLngs[i + 1]],
-        globalCellOptions,
-      )
-      window.plugin.l10s2grid.regionLayer.addLayer(poly1)
-      //southern mirror of the above
-      const poly2 = L.geodesicPolyline(
-        [
-          [-latLngs[i][0], latLngs[i][1]],
-          [-latLngs[i + 1][0], latLngs[i + 1][1]],
-        ],
-        globalCellOptions,
-      )
-      window.plugin.l10s2grid.regionLayer.addLayer(poly2)
-    }
-    // and the north-south lines. no need for geodesic here
-    for (let i = -135; i <= 135; i += 90) {
-      const poly = L.polyline(
-        [[35.264389682754654, i], [-35.264389682754654, i]],
-        globalCellOptions,
-      )
-      window.plugin.l10s2grid.regionLayer.addLayer(poly)
-    }
-  }
-  window.plugin.l10s2grid.drawCell = (
-    cell,
-    cellBounds,
-    visiblePortals,
-    colourOverride,
-  ) => {
-    //TODO: move to function - then call for all cells on screen
-    // corner points
-    const corners = cell.getCornerLatLngs()
-    // center point
-    const center = cell.getLatLng()
-    // name
-    const name = window.plugin.l10s2grid.regionName(cell)
-    const color = cell.level == 10 ? 'gold' : 'orange'
+  function drawCellFn(cell, cellBounds, visiblePortals, colourOverride) {
+    const corners = cell.getCornerLatLngs();
+    const center = cell.getLatLng();
+    const color = cell.level == 10 ? 'gold' : 'orange';
     // the level 6 cells have noticible errors with non-geodesic lines - and the larger level 4 cells are worse
     // NOTE: we only draw two of the edges. as we draw all cells on screen, the other two edges will either be drawn
     // from the other cell, or be off screen so we don't care
@@ -604,39 +74,21 @@ function wrapper(plugin_info) {
       color: colourOverride || color,
       opacity: 0.5,
       weight: 2,
-      clickable: false,
-    })
+      clickable: false
+    });
 
-    const pointInPoly = (point, vs) => {
-      // ray-casting algorithm based on
-      // http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
-      let x = point[0],
-        y = point[1]
-      let inside = false
-      for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-        let xi = vs[i][0],
-          yi = vs[i][1]
-        let xj = vs[j][0],
-          yj = vs[j][1]
-        let intersect =
-          yi > y != yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi
-        if (intersect) inside = !inside
-      }
-      return inside
-    }
-
-    window.plugin.l10s2grid.regionLayer.addLayer(borders)
+    window.plugin.submitHelper.regionLayer.addLayer(borders);
     // Show indicator of non-empty cells (only on level 15 and smaller).
     // This cannot reasonably be used on zoom levels higher than that (e.g. for
     // searching gyms) because the intel map only returns links on higher zoom
     // levels.
-    if (cell.level >= 15 && helpers.showCellsWithPortals) {
+    if (cell.level >= 15 && flags.cellsWithPortals) {
       const cellPortals = visiblePortals.filter((x) => {
-        const point = [x.latLng.lat, x.latLng.lng]
-        const poly = corners.map((x) => [x.lat, x.lng])
+        const point = [x.latLng.lat, x.latLng.lng];
+        const poly = corners.map((x) => [x.lat, x.lng]);
 
-        return pointInPoly(point, poly)
-      })
+        return pointInPoly(point, poly);
+      });
 
       if (cellPortals.length) {
         const fill = L.geodesicPolyline(corners, {
@@ -644,32 +96,268 @@ function wrapper(plugin_info) {
           color: 'red',
           fillOpacity: 0.6,
           weight: 0,
-          clickable: false,
-        })
-        window.plugin.l10s2grid.regionLayer.addLayer(fill)
+          clickable: false
+        });
+        window.plugin.submitHelper.regionLayer.addLayer(fill);
       }
     }
   }
-  const setup = window.plugin.l10s2grid.setup
-  // PLUGIN END //////////////////////////////////////////////////////////
-  setup.info = plugin_info //add the script info data to the function as a property
-  if (!window.bootPlugins) window.bootPlugins = []
-  window.bootPlugins.push(setup)
-  // if IITC has already booted, immediately run the 'setup' function
-  if (window.iitcLoaded && typeof setup === 'function') setup()
-} // wrapper end
-// inject code into site context
-const script = document.createElement('script')
-const info = {}
-if (typeof GM_info !== 'undefined' && GM_info && GM_info.script)
+
+  function initialiseUI() {
+    const parentEl = $('.leaflet-control-zoom');
+    const s2Lock = $(document.createElement('div'))
+      .prop('id', 'iitc-submit-helper-s2Lock')
+      .prop('title', 'S2 cell level locker')
+      .text('zXX');
+    const cellsWithPortals = $(document.createElement('div'))
+      .prop('id', 'iitc-submit-helper-cellsWithPortals')
+      .prop('title', 'Show cells that contain portals')
+      .append('<i class="fas fa-eye"></i>');
+    const gymCells = $(document.createElement('div'))
+      .prop('id', 'iitc-submit-helper-gymCells')
+      .prop('title', 'Always show level 14 S2 cells')
+      .append('<i class="fas fa-dragon"></i>');
+
+    parentEl.append(s2Lock);
+    parentEl.append(cellsWithPortals);
+    parentEl.append(gymCells);
+
+    s2Lock.click(() => {
+      toggleFlag('s2Lock', map.getZoom());
+      setS2LockText();
+    });
+    cellsWithPortals.click(() => {
+      toggleFlag('cellsWithPortals', true);
+    });
+    gymCells.click(() => {
+      toggleFlag('gymCells', true);
+    });
+
+    // Add the layer group
+    window.plugin.submitHelper.regionLayer = L.layerGroup();
+    addLayerGroup('Submit Helper', window.plugin.submitHelper.regionLayer, true);
+  }
+
+  function injectS2Calculation() {
+    /* prettier-ignore */
+    (function(){window.S2={};const a=n=>{const o=Math.PI/180,p=n.lat*o,q=n.lng*o,r=Math.cos(p);return[Math.cos(q)*r,Math.sin(q)*r,Math.sin(p)]},b=n=>{const o=180/Math.PI,p=Math.atan2(n[2],Math.sqrt(n[0]*n[0]+n[1]*n[1])),q=Math.atan2(n[1],n[0]);return L.latLng(p*o,q*o)},c=n=>{const o=[Math.abs(n[0]),Math.abs(n[1]),Math.abs(n[2])];return o[0]>o[1]?o[0]>o[2]?0:2:o[1]>o[2]?1:2},d=(n,o)=>{let p,q;switch(n){case 0:p=o[1]/o[0],q=o[2]/o[0];break;case 1:p=-o[0]/o[1],q=o[2]/o[1];break;case 2:p=-o[0]/o[2],q=-o[1]/o[2];break;case 3:p=o[2]/o[0],q=o[1]/o[0];break;case 4:p=o[2]/o[1],q=-o[0]/o[1];break;case 5:p=-o[1]/o[2],q=-o[0]/o[2];break;default:throw{error:'Invalid face'};}return[p,q]},e=n=>{let o=c(n);return 0>n[o]&&(o+=3),uv=d(o,n),[o,uv]},f=(n,o)=>{const p=o[0],q=o[1];switch(n){case 0:return[1,p,q];case 1:return[-p,1,q];case 2:return[-p,-q,1];case 3:return[-1,-q,-p];case 4:return[q,-1,-p];case 5:return[q,p,-1];default:throw{error:'Invalid face'};}},g=n=>{const o=p=>{return 0.5<=p?1/3*(4*p*p-1):1/3*(1-4*(1-p)*(1-p))};return[o(n[0]),o(n[1])]},h=n=>{const o=p=>{return 0<=p?0.5*Math.sqrt(1+3*p):1-0.5*Math.sqrt(1-3*p)};return[o(n[0]),o(n[1])]},k=(n,o)=>{const p=1<<o,q=r=>{const s=Math.floor(r*p);return Math.max(0,Math.min(p-1,s))};return[q(n[0]),q(n[1])]},l=(n,o,p)=>{const q=1<<o;return[(n[0]+p[0])/q,(n[1]+p[1])/q]},m=(n,o,p)=>{const q={a:[[0,'d'],[1,'a'],[3,'b'],[2,'a']],b:[[2,'b'],[1,'b'],[3,'a'],[0,'c']],c:[[2,'c'],[3,'d'],[1,'c'],[0,'b']],d:[[0,'a'],[3,'c'],[1,'d'],[2,'d']]};let r='a';const s=[];for(let w=p-1;0<=w;w--){const z=1<<w,A=n&z?1:0,B=o&z?1:0,C=q[r][2*A+B];s.push(C[0]),r=C[1]}return s};S2.S2Cell=function(){},S2.S2Cell.FromLatLng=(n,o)=>{const p=a(n),q=e(p),r=h(q[1]),s=k(r,o);return S2.S2Cell.FromFaceIJ(q[0],s,o)},S2.S2Cell.FromFaceIJ=(n,o,p)=>{const q=new S2.S2Cell;return q.face=n,q.ij=o,q.level=p,q},S2.S2Cell.prototype.toString=function(){return'F'+this.face+'ij['+this.ij[0]+','+this.ij[1]+']@'+this.level},S2.S2Cell.prototype.getLatLng=function(){const n=l(this.ij,this.level,[0.5,0.5]),o=g(n),p=f(this.face,o);return b(p)},S2.S2Cell.prototype.getCornerLatLngs=function(){const n=[],o=[[0,0],[0,1],[1,1],[1,0]];for(let p=0;4>p;p++){const q=l(this.ij,this.level,o[p]),r=g(q),s=f(this.face,r);n.push(b(s))}return n},S2.S2Cell.prototype.getFaceAndQuads=function(){const n=m(this.ij[0],this.ij[1],this.level);return[this.face,n]},S2.S2Cell.prototype.getNeighbors=function(){const n=(s,w,z)=>{const A=1<<z;if(0<=w[0]&&0<=w[1]&&w[0]<A&&w[1]<A)return S2.S2Cell.FromFaceIJ(s,w,z);const B=l(w,z,[0.5,0.5]),C=g(B),D=f(s,C),E=e(D);return s=E[0],C=E[1],B=h(C),w=k(B,z),S2.S2Cell.FromFaceIJ(s,w,z)},o=this.face,p=this.ij[0],q=this.ij[1],r=this.level;return[n(o,[p-1,q],r),n(o,[p,q-1],r),n(o,[p+1,q],r),n(o,[p,q+1],r)]}})();
+  }
+
+  // Inject plugin styles & FontAwesome
+  function injectStyles() {
+    const styles = `
+      #iitc-submit-helper-cellsWithPortals,
+      #iitc-submit-helper-gymCells,
+      #iitc-submit-helper-s2Lock {
+        height: 26px;
+        width: 26px;
+        right:0;
+        z-index:3003;
+        background: #fff;
+        color: black;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 500;
+        cursor: pointer;
+        position: relative;
+        border-bottom: 1px solid #ccc;
+      }
+      #iitc-submit-helper-s2Lock.active {
+        background: #c75c3b;
+        color: whitesmoke;
+      }
+      #iitc-submit-helper-gymCells {
+        border-bottom-left-radius: 4px;
+        border-bottom-right-radius: 4px;
+        border-bottom: 0;
+      }
+      #iitc-submit-helper-cellsWithPortals > i,
+      #iitc-submit-helper-gymCells > i {
+        font-size: 18px;
+        padding-left: 2px;
+        opacity: 0.3;
+      }
+      #iitc-submit-helper-cellsWithPortals.active > i,
+      #iitc-submit-helper-gymCells.active > i {
+        opacity: 1
+      }
+      .leaflet-touch #iitc-submit-helper-cellsWithPortals,
+      .leaflet-touch #iitc-submit-helper-gymCells,
+      .leaflet-touch #iitc-submit-helper-s2Lock {
+        height: 30px;
+        width: 30px;
+      }
+    `;
+
+    $('<style>')
+      .prop('type', 'text/css')
+      .html(styles)
+      .appendTo('head');
+
+    $('<link>')
+      .prop('rel', 'stylesheet')
+      .prop('href', 'https://use.fontawesome.com/releases/v5.4.2/css/all.css')
+      .appendTo('head');
+  }
+
+  function pointInPoly(point, vs) {
+    // ray-casting algorithm based on
+    // http://www.ecse.rpi.edu/Homepages/wrf/Research/Short_Notes/pnpoly.html
+    let x = point[0],
+      y = point[1];
+    let inside = false;
+    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+      let xi = vs[i][0],
+        yi = vs[i][1];
+      let xj = vs[j][0],
+        yj = vs[j][1];
+      let intersect = yi > y != yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function setS2LockText() {
+    $('#iitc-submit-helper-s2Lock').text(`z${flags.s2Lock || map.getZoom()}`);
+  }
+
+  function toggleFlag(key, value) {
+    const flagEl = $(`#iitc-submit-helper-${key}`);
+
+    if (flags[key]) {
+      flagEl.removeClass('active');
+      flags[key] = 0;
+    } else {
+      flagEl.addClass('active');
+      flags[key] = value;
+    }
+
+    window.plugin.submitHelper.update();
+  }
+
+  function updateFn() {
+    setS2LockText();
+
+    window.plugin.submitHelper.regionLayer.clearLayers();
+
+    const bounds = map.getBounds();
+    const seenCells = {};
+    // Set Cell Size
+    let cellSize = 10;
+    // centre cell
+    let zoom = map.getZoom();
+    if (!flags.s2Lock) {
+      cellSize = zoom;
+    } else {
+      cellSize = flags.s2Lock;
+    }
+
+    const drawCellAndNeighborsFn = (cell, visiblePortals = [], colourOverride) => {
+      const cellStr = cell.toString();
+
+      if (!seenCells[cellStr]) {
+        // cell not visited - flag it as visited now
+        seenCells[cellStr] = true;
+        // is it on the screen?
+        const corners = cell.getCornerLatLngs();
+        const cellBounds = L.latLngBounds(corners);
+        if (cellBounds.intersects(bounds)) {
+          // on screen - draw it
+          drawCellFn(cell, cellBounds, visiblePortals, colourOverride);
+          // and recurse to our neighbors
+          const neighbors = cell.getNeighbors();
+          for (let i = 0; i < neighbors.length; i++) {
+            drawCellAndNeighborsFn(neighbors[i], visiblePortals, colourOverride);
+          }
+        }
+      }
+    };
+
+    if (zoom >= 5) {
+      const mapBounds = map.getBounds();
+      const visiblePortals = Object.values(window.portals || {})
+        .map((x) => ({
+          latLng: x.getLatLng(),
+          title: x.options.data.title
+        }))
+        .filter((x) => x)
+        .filter((x) => {
+          if (!x.title || !x.latLng) return false;
+          return mapBounds.contains(x.latLng);
+        });
+
+      const cell = S2.S2Cell.FromLatLng(map.getCenter(), cellSize);
+      drawCellAndNeighborsFn(cell, visiblePortals);
+    }
+
+    if (flags.gymCells) {
+      const center = S2.S2Cell.FromLatLng(map.getCenter(), 14);
+      drawCellAndNeighborsFn(center, [], '#ff31d9');
+    }
+    // the six cube side boundaries. we cheat by hard-coding the coords as it's simple enough
+    const latLngs = [
+      [45, -180],
+      [35.264389682754654, -135],
+      [35.264389682754654, -45],
+      [35.264389682754654, 45],
+      [35.264389682754654, 135],
+      [45, 180]
+    ];
+    const globalCellOptions = {
+      color: 'red',
+      weight: 7,
+      opacity: 0.5,
+      clickable: false
+    };
+    for (let i = 0; i < latLngs.length - 1; i++) {
+      // the geodesic line code can't handle a line/polyline spanning more than (or close to?) 180 degrees, so we draw
+      // each segment as a separate line
+      const poly1 = L.geodesicPolyline([latLngs[i], latLngs[i + 1]], globalCellOptions);
+      window.plugin.submitHelper.regionLayer.addLayer(poly1);
+      //southern mirror of the above
+      const poly2 = L.geodesicPolyline(
+        [[-latLngs[i][0], latLngs[i][1]], [-latLngs[i + 1][0], latLngs[i + 1][1]]],
+        globalCellOptions
+      );
+      window.plugin.submitHelper.regionLayer.addLayer(poly2);
+    }
+    // and the north-south lines. no need for geodesic here
+    for (let i = -135; i <= 135; i += 90) {
+      const poly = L.polyline([[35.264389682754654, i], [-35.264389682754654, i]], globalCellOptions);
+      window.plugin.submitHelper.regionLayer.addLayer(poly);
+    }
+  }
+
+  /*   ---- END OF PLUGIN ----   */
+
+  // Add an info property for IITC's plugin system
+  setup.info = plugin_info;
+  // Make sure window.bootPlugins exists and is an array
+  if (!window.bootPlugins) window.bootPlugins = [];
+  // Add our startup hook
+  window.bootPlugins.push(setup);
+  // If IITC has already booted, immediately run the 'setup' function
+  if (window.iitcLoaded && typeof setup === 'function') setup();
+}
+
+// Create a script element to hold our content script
+var script = document.createElement('script');
+var info = {};
+
+// GM_info is defined by the assorted monkey-themed browser extensions
+// and holds information parsed from the script header.
+if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
   info.script = {
     version: GM_info.script.version,
     name: GM_info.script.name,
-    description: GM_info.script.description,
-  }
-script.appendChild(
-  document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ');'),
-)
-;(document.body || document.head || document.documentElement).appendChild(
-  script,
-)
+    description: GM_info.script.description
+  };
+}
+
+// Create a text node and our IIFE inside of it
+var textContent = document.createTextNode('(' + wrapper + ')(' + JSON.stringify(info) + ')');
+// Add some content to the script element
+script.appendChild(textContent);
+// Finally, inject it... wherever.
+(document.body || document.head || document.documentElement).appendChild(script);
