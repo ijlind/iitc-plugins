@@ -276,6 +276,7 @@ function wrapper(plugin_info) {
 
     if (zoom >= 5) {
       const mapBounds = map.getBounds();
+      const visibleBounds = mapBounds.pad(zoom > 16 ? 1 : 0.1)
       const visiblePortals = Object.values(window.portals || {})
         .map((x) => ({
           latLng: x.getLatLng(),
@@ -284,7 +285,7 @@ function wrapper(plugin_info) {
         .filter((x) => x)
         .filter((x) => {
           if (!x.title || !x.latLng) return false;
-          return mapBounds.contains(x.latLng);
+          return visibleBounds.contains(x.latLng);
         });
 
       const cell = S2.S2Cell.FromLatLng(map.getCenter(), cellSize);
