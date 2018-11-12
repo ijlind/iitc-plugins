@@ -2,7 +2,7 @@
 // @id             iitc-plugin-submit-helper@ijlind
 // @name           IITC Plugin: Submit Helper
 // @category       Layer
-// @version        0.1.0
+// @version        0.2.0
 // @description    Utilities for making portal submissions easier.
 // @updateURL      https://github.com/ijlind/iitc-plugins/raw/master/iitc-plugin-submit-tools.user.js
 // @downloadURL    https://github.com/ijlind/iitc-plugins/raw/master/iitc-plugin-submit-tools.user.js
@@ -23,7 +23,7 @@ function wrapper(plugin_info) {
     window.plugin = function() {};
   }
   plugin_info.buildName = 'Submit Helper';
-  plugin_info.dateTimeVersion = '20181106082400';
+  plugin_info.dateTimeVersion = '20181112060000';
   plugin_info.pluginId = 'submit-helper';
 
   /*   ---- START OF PLUGIN ----   */
@@ -62,20 +62,31 @@ function wrapper(plugin_info) {
 
   ////// Plugin utility functions
 
-  function drawCellFn(cell, cellBounds, visiblePortals, colourOverride) {
+  function drawCellFn(cell, cellBounds, visiblePortals, overrides = {}, withContentCount) {
     const corners = cell.getCornerLatLngs();
     const center = cell.getLatLng();
-    const color = cell.level == 10 ? 'gold' : 'orange';
+    const color = 'orange';
     // the level 6 cells have noticible errors with non-geodesic lines - and the larger level 4 cells are worse
     // NOTE: we only draw two of the edges. as we draw all cells on screen, the other two edges will either be drawn
     // from the other cell, or be off screen so we don't care
     const borders = L.geodesicPolyline([corners[0], corners[1], corners[2]], {
       fill: false,
-      color: colourOverride || color,
-      opacity: 0.5,
-      weight: 2,
+      color: overrides.color || color,
+      opacity: 0.7,
+      weight: overrides.borderWeight || 2,
       clickable: false
     });
+
+    if (withContentCount >= 0) {
+      const isClose =
+        withContentCount === 1 || withContentCount === 5 || (withContentCount > 17 && withContentCount < 20);
+      const emphasisClass = isClose ? 'close' : '';
+      const countIcon = L.divIcon({
+        html: `<div class="iitc-submit-helper-count-icon ${emphasisClass}">${withContentCount}</div>`
+      });
+      const marker = L.marker(center, { icon: countIcon });
+      window.plugin.submitHelper.regionLayer.addLayer(marker);
+    }
 
     window.plugin.submitHelper.regionLayer.addLayer(borders);
     // Show indicator of non-empty cells (only on level 15 and smaller).
@@ -111,11 +122,11 @@ function wrapper(plugin_info) {
       .text('zXX');
     const cellsWithPortals = $(document.createElement('div'))
       .prop('id', 'iitc-submit-helper-cellsWithPortals')
-      .prop('title', 'Show cells that contain portals')
+      .prop('title', 'Show cells that contain portals (only on zoom levels of 15 and higher)')
       .append('<i class="fas fa-eye"></i>');
     const gymCells = $(document.createElement('div'))
       .prop('id', 'iitc-submit-helper-gymCells')
-      .prop('title', 'Always show level 14 S2 cells')
+      .prop('title', 'Always show level 14 S2 cells with level 17 "hit counts" (only on zoom levels of 14 and higher)')
       .append('<i class="fas fa-dragon"></i>');
 
     parentEl.append(s2Lock);
@@ -146,6 +157,28 @@ function wrapper(plugin_info) {
   // Inject plugin styles & FontAwesome
   function injectStyles() {
     const styles = `
+      .iitc-submit-helper-count-icon {
+        position: absolute;
+        background: whitesmoke;
+        height: 24px;
+        width: 24px;
+        top: -12px;
+        left: -12px;
+        border-radius: 24px;
+        align-items: center;
+        justify-content: center;
+        display: flex;
+        border: solid 3px #555555;
+        color: #555555;
+        font-size: 16px;
+        font-weight: 600;
+        transform: rotate(20deg);
+        opacity: 0.9;
+      }
+      .iitc-submit-helper-count-icon.close {
+        color: orange;
+        border-color: orange;
+      }
       #iitc-submit-helper-cellsWithPortals,
       #iitc-submit-helper-gymCells,
       #iitc-submit-helper-s2Lock {
@@ -162,10 +195,25 @@ function wrapper(plugin_info) {
         cursor: pointer;
         position: relative;
         border-bottom: 1px solid #ccc;
+        overflow: hidden;
       }
       #iitc-submit-helper-s2Lock.active {
         background: #c75c3b;
         color: whitesmoke;
+      }
+      #iitc-submit-helper-cellsWithPortals[disabled="disabled"],
+      #iitc-submit-helper-gymCells[disabled="disabled"] {
+        cursor: not-allowed;
+      }
+      #iitc-submit-helper-cellsWithPortals[disabled="disabled"]:after,
+      #iitc-submit-helper-gymCells[disabled="disabled"]:after {
+        content: ' ';
+        position: absolute;
+        background: darkgray;
+        opacity: 0.8;
+        height: 6px;
+        width: 200%;
+        transform: rotate(-45deg);
       }
       #iitc-submit-helper-gymCells {
         border-bottom-left-radius: 4px;
@@ -225,6 +273,11 @@ function wrapper(plugin_info) {
   function toggleFlag(key, value) {
     const flagEl = $(`#iitc-submit-helper-${key}`);
 
+    // Do not toggle iff disabled
+    if (flagEl.attr('disabled') === 'disabled') {
+      return;
+    }
+
     if (flags[key]) {
       flagEl.removeClass('active');
       flags[key] = 0;
@@ -236,13 +289,21 @@ function wrapper(plugin_info) {
     window.plugin.submitHelper.update();
   }
 
+  function setToggleDisabled(key, disabled) {
+    const toggleEl = $(`#iitc-submit-helper-${key}`);
+    toggleEl.attr('disabled', disabled);
+
+    if (disabled) {
+      toggleEl.removeClass('active');
+      flags[key] = 0;
+    }
+  }
+
   function updateFn() {
     setS2LockText();
-
     window.plugin.submitHelper.regionLayer.clearLayers();
 
     const bounds = map.getBounds();
-    const seenCells = {};
     // Set Cell Size
     let cellSize = 10;
     // centre cell
@@ -253,8 +314,47 @@ function wrapper(plugin_info) {
       cellSize = flags.s2Lock;
     }
 
-    const drawCellAndNeighborsFn = (cell, visiblePortals = [], colourOverride) => {
+    // Disable some properties if zoomed out too far
+    setToggleDisabled('cellsWithPortals', zoom < 15);
+    setToggleDisabled('gymCells', zoom < 15);
+
+    const drawCellAndNeighborsFn = (cell, seenCells, visiblePortals = [], overrides, countCalculationSize = 0) => {
       const cellStr = cell.toString();
+      const sizeDiff = countCalculationSize - cell.level;
+      let withContentCount = -1;
+
+      if (sizeDiff > 0) {
+        const innerCells = [];
+        const sideLength = Math.pow(2, sizeDiff);
+        const cornerLatLng = cell.getCornerLatLngs()[0];
+
+        // Adjust the corner to make sure it is not rounded to the
+        // of the adjoining grid cell.(0.00001 ≈ 1.1 meters)
+        cornerLatLng.lat = cornerLatLng.lat + 0.00001;
+        cornerLatLng.lng = cornerLatLng.lng - 0.00001;
+
+        const cornerCell = S2.S2Cell.FromLatLng(cornerLatLng, countCalculationSize);
+
+        for (let i = 0; i < sideLength; i++) {
+          for (let j = 0; j < sideLength; j++) {
+            const { face, ij, level } = cornerCell;
+            const adjustedIJ = [ij[0] + i, ij[1] + j];
+            innerCells.push(S2.S2Cell.FromFaceIJ(face, adjustedIJ, level));
+          }
+        }
+
+        withContentCount = innerCells.reduce((acc, cell) => {
+          const corners = cell.getCornerLatLngs();
+          const match = visiblePortals.find((x) => {
+            const point = [x.latLng.lat, x.latLng.lng];
+            const poly = corners.map((x) => [x.lat, x.lng]);
+
+            return pointInPoly(point, poly);
+          });
+
+          return match ? acc + 1 : acc;
+        }, 0);
+      }
 
       if (!seenCells[cellStr]) {
         // cell not visited - flag it as visited now
@@ -264,37 +364,38 @@ function wrapper(plugin_info) {
         const cellBounds = L.latLngBounds(corners);
         if (cellBounds.intersects(bounds)) {
           // on screen - draw it
-          drawCellFn(cell, cellBounds, visiblePortals, colourOverride);
+          drawCellFn(cell, cellBounds, visiblePortals, overrides, withContentCount);
           // and recurse to our neighbors
           const neighbors = cell.getNeighbors();
           for (let i = 0; i < neighbors.length; i++) {
-            drawCellAndNeighborsFn(neighbors[i], visiblePortals, colourOverride);
+            drawCellAndNeighborsFn(neighbors[i], seenCells, visiblePortals, overrides, countCalculationSize);
           }
         }
       }
     };
 
-    if (zoom >= 5) {
-      const mapBounds = map.getBounds();
-      const visibleBounds = mapBounds.pad(zoom > 16 ? 1 : 0.1)
-      const visiblePortals = Object.values(window.portals || {})
-        .map((x) => ({
-          latLng: x.getLatLng(),
-          title: x.options.data.title
-        }))
-        .filter((x) => x)
-        .filter((x) => {
-          if (!x.title || !x.latLng) return false;
-          return visibleBounds.contains(x.latLng);
-        });
+    const mapBounds = map.getBounds();
+    const visibleBounds = mapBounds.pad(zoom > 16 ? 1 : 0.1);
+    const visiblePortals = Object.values(window.portals || {})
+      .map((x) => ({
+        latLng: x.getLatLng(),
+        title: x.options.data.title
+      }))
+      .filter((x) => x)
+      .filter((x) => {
+        if (!x.title || !x.latLng) return false;
+        return visibleBounds.contains(x.latLng);
+      });
 
-      const cell = S2.S2Cell.FromLatLng(map.getCenter(), cellSize);
-      drawCellAndNeighborsFn(cell, visiblePortals);
+    const cell = S2.S2Cell.FromLatLng(map.getCenter(), cellSize);
+
+    if (zoom >= 5) {
+      drawCellAndNeighborsFn(cell, {}, visiblePortals);
     }
 
     if (flags.gymCells) {
-      const center = S2.S2Cell.FromLatLng(map.getCenter(), 14);
-      drawCellAndNeighborsFn(center, [], '#ff31d9');
+      const centerCell = S2.S2Cell.FromLatLng(map.getCenter(), 14);
+      drawCellAndNeighborsFn(centerCell, {}, visiblePortals, { color: '#ff31d9', borderWeight: 3 }, 17);
     }
     // the six cube side boundaries. we cheat by hard-coding the coords as it's simple enough
     const latLngs = [
