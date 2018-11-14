@@ -78,9 +78,13 @@ function wrapper(plugin_info) {
     });
 
     if (withContentCount >= 0) {
+      const mapBounds = map.getBounds().pad(0.1);
+      const cellBounds = L.latLngBounds(corners);
+      const isUncertain = !mapBounds.contains(cellBounds);
       const isClose =
         withContentCount === 1 || withContentCount === 5 || (withContentCount > 17 && withContentCount < 20);
-      const emphasisClass = isClose ? 'close' : '';
+      const isFull = withContentCount >= 20;
+      const emphasisClass = isUncertain ? 'uncertain' : isFull ? 'full' : isClose ? 'close' : '';
       const countIcon = L.divIcon({
         html: `<div class="iitc-submit-helper-count-icon ${emphasisClass}">${withContentCount}</div>`
       });
@@ -178,6 +182,15 @@ function wrapper(plugin_info) {
       .iitc-submit-helper-count-icon.close {
         color: orange;
         border-color: orange;
+      }
+      .iitc-submit-helper-count-icon.uncertain {
+        color: #999999;
+        border-color: #999999;
+        border-style: dashed;
+      }
+      .iitc-submit-helper-count-icon.full {
+        color: #f83a10;
+        border-color: #f83a10;
       }
       #iitc-submit-helper-cellsWithPortals,
       #iitc-submit-helper-gymCells,
@@ -375,7 +388,7 @@ function wrapper(plugin_info) {
     };
 
     const mapBounds = map.getBounds();
-    const visibleBounds = mapBounds.pad(zoom > 16 ? 1 : 0.1);
+    const visibleBounds = mapBounds.pad(zoom > 16 ? 1 : 0.5);
     const visiblePortals = Object.values(window.portals || {})
       .map((x) => ({
         latLng: x.getLatLng(),
