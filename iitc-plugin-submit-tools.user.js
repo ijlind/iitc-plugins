@@ -31,7 +31,8 @@ function wrapper(plugin_info) {
   const flags = {
     cellsWithPortals: 0,
     gymCells: 0,
-    s2Lock: 0
+    s2Lock: 0,
+    submitDeadzone: 0
   };
 
   // Create a namespace for the plugin
@@ -89,10 +90,10 @@ function wrapper(plugin_info) {
         html: `<div class="iitc-submit-helper-count-icon ${emphasisClass}">${withContentCount}</div>`
       });
       const marker = L.marker(center, { icon: countIcon });
-      window.plugin.submitHelper.regionLayer.addLayer(marker);
+      window.plugin.submitHelper.cellLayer.addLayer(marker);
     }
 
-    window.plugin.submitHelper.regionLayer.addLayer(borders);
+    window.plugin.submitHelper.cellLayer.addLayer(borders);
     // Show indicator of non-empty cells (only on level 15 and smaller).
     // This cannot reasonably be used on zoom levels higher than that (e.g. for
     // searching gyms) because the intel map only returns links on higher zoom
@@ -108,14 +109,27 @@ function wrapper(plugin_info) {
       if (cellPortals.length) {
         const fill = L.geodesicPolyline(corners, {
           fill: true,
-          color: 'red',
+          color: '#c75c3b',
           fillOpacity: 0.6,
           weight: 0,
           clickable: false
         });
-        window.plugin.submitHelper.regionLayer.addLayer(fill);
+        window.plugin.submitHelper.cellLayer.addLayer(fill);
       }
     }
+  }
+
+  function drawDeadzones(visiblePortals = []) {
+    // Clear old deadzones
+    window.plugin.submitHelper.deadzoneLayer.clearLayers();
+
+    visiblePortals.forEach((p) => {
+      L.geodesicCircle(
+        p.latLng,
+        20,
+        L.extend({}, window.plugin.drawTools.polygonOptions, { color: '#c75c3b', clickable: false })
+      ).addTo(window.plugin.submitHelper.deadzoneLayer);
+    });
   }
 
   function initialiseUI() {
@@ -123,18 +137,27 @@ function wrapper(plugin_info) {
     const s2Lock = $(document.createElement('div'))
       .prop('id', 'iitc-submit-helper-s2Lock')
       .prop('title', 'S2 cell level locker')
+      .addClass('submit-helper-button')
       .text('zXX');
     const cellsWithPortals = $(document.createElement('div'))
       .prop('id', 'iitc-submit-helper-cellsWithPortals')
       .prop('title', 'Show cells that contain portals (only on zoom levels of 15 and higher)')
-      .append('<i class="fas fa-eye"></i>');
+      .addClass('submit-helper-button')
+      .append('<i class="fas fa-th-large"></i>');
+    const submitDeadzone = $(document.createElement('div'))
+      .prop('id', 'iitc-submit-helper-submitDeadzone')
+      .prop('title', 'Show submit deadzone around portals (approx. 20m)')
+      .addClass('submit-helper-button')
+      .append('<i class="fas fa-ban"></i>');
     const gymCells = $(document.createElement('div'))
       .prop('id', 'iitc-submit-helper-gymCells')
       .prop('title', 'Always show level 14 S2 cells with level 17 "hit counts" (only on zoom levels of 14 and higher)')
+      .addClass('submit-helper-button')
       .append('<i class="fas fa-dragon"></i>');
 
     parentEl.append(s2Lock);
     parentEl.append(cellsWithPortals);
+    parentEl.append(submitDeadzone);
     parentEl.append(gymCells);
 
     s2Lock.click(() => {
@@ -144,13 +167,18 @@ function wrapper(plugin_info) {
     cellsWithPortals.click(() => {
       toggleFlag('cellsWithPortals', true);
     });
+    submitDeadzone.click(() => {
+      toggleFlag('submitDeadzone', true);
+    });
     gymCells.click(() => {
       toggleFlag('gymCells', true);
     });
 
-    // Add the layer group
-    window.plugin.submitHelper.regionLayer = L.layerGroup();
-    addLayerGroup('Submit Helper', window.plugin.submitHelper.regionLayer, true);
+    // Add the layer groups
+    window.plugin.submitHelper.cellLayer = L.layerGroup();
+    window.plugin.submitHelper.deadzoneLayer = L.layerGroup();
+    addLayerGroup('Submit Helper', window.plugin.submitHelper.cellLayer, true);
+    addLayerGroup('Submit Helper (deadzone)', window.plugin.submitHelper.deadzoneLayer, true);
   }
 
   function injectS2Calculation() {
@@ -192,9 +220,7 @@ function wrapper(plugin_info) {
         color: #f83a10;
         border-color: #f83a10;
       }
-      #iitc-submit-helper-cellsWithPortals,
-      #iitc-submit-helper-gymCells,
-      #iitc-submit-helper-s2Lock {
+      .submit-helper-button {
         height: 26px;
         width: 26px;
         right:0;
@@ -210,42 +236,24 @@ function wrapper(plugin_info) {
         border-bottom: 1px solid #ccc;
         overflow: hidden;
       }
-      #iitc-submit-helper-s2Lock.active {
+      .submit-helper-button.active {
         background: #c75c3b;
         color: whitesmoke;
-      }
-      #iitc-submit-helper-cellsWithPortals[disabled="disabled"],
-      #iitc-submit-helper-gymCells[disabled="disabled"] {
-        cursor: not-allowed;
-      }
-      #iitc-submit-helper-cellsWithPortals[disabled="disabled"]:after,
-      #iitc-submit-helper-gymCells[disabled="disabled"]:after {
-        content: ' ';
-        position: absolute;
-        background: darkgray;
-        opacity: 0.8;
-        height: 6px;
-        width: 200%;
-        transform: rotate(-45deg);
       }
       #iitc-submit-helper-gymCells {
         border-bottom-left-radius: 4px;
         border-bottom-right-radius: 4px;
         border-bottom: 0;
       }
-      #iitc-submit-helper-cellsWithPortals > i,
-      #iitc-submit-helper-gymCells > i {
-        font-size: 18px;
+      .submit-helper-button > i {
+        font-size: 14px;
         padding-left: 2px;
         opacity: 0.3;
       }
-      #iitc-submit-helper-cellsWithPortals.active > i,
-      #iitc-submit-helper-gymCells.active > i {
+      .submit-helper-button.active > i {
         opacity: 1
       }
-      .leaflet-touch #iitc-submit-helper-cellsWithPortals,
-      .leaflet-touch #iitc-submit-helper-gymCells,
-      .leaflet-touch #iitc-submit-helper-s2Lock {
+      .leaflet-touch .submit-helper-button {
         height: 30px;
         width: 30px;
       }
@@ -302,19 +310,10 @@ function wrapper(plugin_info) {
     window.plugin.submitHelper.update();
   }
 
-  function setToggleDisabled(key, disabled) {
-    const toggleEl = $(`#iitc-submit-helper-${key}`);
-    toggleEl.attr('disabled', disabled);
-
-    if (disabled) {
-      toggleEl.removeClass('active');
-      flags[key] = 0;
-    }
-  }
-
   function updateFn() {
     setS2LockText();
-    window.plugin.submitHelper.regionLayer.clearLayers();
+    window.plugin.submitHelper.cellLayer.clearLayers();
+    window.plugin.submitHelper.deadzoneLayer.clearLayers();
 
     const bounds = map.getBounds();
     // Set Cell Size
@@ -326,10 +325,6 @@ function wrapper(plugin_info) {
     } else {
       cellSize = flags.s2Lock;
     }
-
-    // Disable some properties if zoomed out too far
-    setToggleDisabled('cellsWithPortals', zoom < 15);
-    setToggleDisabled('gymCells', zoom < 15);
 
     const drawCellAndNeighborsFn = (cell, seenCells, visiblePortals = [], overrides, countCalculationSize = 0) => {
       const cellStr = cell.toString();
@@ -410,6 +405,11 @@ function wrapper(plugin_info) {
       const centerCell = S2.S2Cell.FromLatLng(map.getCenter(), 14);
       drawCellAndNeighborsFn(centerCell, {}, visiblePortals, { color: '#ff31d9', borderWeight: 3 }, 17);
     }
+
+    if (flags.submitDeadzone && zoom >= 15) {
+      drawDeadzones(visiblePortals);
+    }
+
     // the six cube side boundaries. we cheat by hard-coding the coords as it's simple enough
     const latLngs = [
       [45, -180],
@@ -429,18 +429,18 @@ function wrapper(plugin_info) {
       // the geodesic line code can't handle a line/polyline spanning more than (or close to?) 180 degrees, so we draw
       // each segment as a separate line
       const poly1 = L.geodesicPolyline([latLngs[i], latLngs[i + 1]], globalCellOptions);
-      window.plugin.submitHelper.regionLayer.addLayer(poly1);
+      window.plugin.submitHelper.cellLayer.addLayer(poly1);
       //southern mirror of the above
       const poly2 = L.geodesicPolyline(
         [[-latLngs[i][0], latLngs[i][1]], [-latLngs[i + 1][0], latLngs[i + 1][1]]],
         globalCellOptions
       );
-      window.plugin.submitHelper.regionLayer.addLayer(poly2);
+      window.plugin.submitHelper.cellLayer.addLayer(poly2);
     }
     // and the north-south lines. no need for geodesic here
     for (let i = -135; i <= 135; i += 90) {
       const poly = L.polyline([[35.264389682754654, i], [-35.264389682754654, i]], globalCellOptions);
-      window.plugin.submitHelper.regionLayer.addLayer(poly);
+      window.plugin.submitHelper.cellLayer.addLayer(poly);
     }
   }
 

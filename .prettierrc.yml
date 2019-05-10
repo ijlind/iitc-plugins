@@ -2,4 +2,4 @@ arrowParens: always
 printWidth: 120
 parser: flow
 semi: true
-singleQuote: trues
+singleQuote: true
